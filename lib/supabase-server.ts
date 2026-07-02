@@ -1,6 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
+
+type CookieSetItem = { name: string; value: string; options?: CookieOptions };
 
 // Admin client — uses service role. NEVER expose to client. Server-only.
 export function supabaseAdmin() {
@@ -21,7 +23,7 @@ export function supabaseSSR() {
     {
       cookies: {
         getAll: () => cookieStore.getAll(),
-        setAll: (list) => {
+        setAll: (list: CookieSetItem[]) => {
           try {
             list.forEach(({ name, value, options }) =>
               cookieStore.set(name, value, options)
