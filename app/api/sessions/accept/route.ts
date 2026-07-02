@@ -1,13 +1,60 @@
 import { NextResponse } from "next/server";
 import { supabaseSSR, supabaseAdmin } from "@/lib/supabase-server";
 import { createHmsRoom, createHmsAuthToken } from "@/lib/hms";
+import { getRedis } from "@/lib/redis";
+import { log } from "@/lib/log";
+
+// Idempotency prevents duplicate 100ms rooms if the agent double-clicks Accept
+// or the request retries on transient network errors.
+//
+// Strategy:
+//   1. Client sends header `Idempotency-Key: <uuid>` per Accept click.
+//   2. On first call, we `SET NX EX 3600 idempotency:{key} = session_id`.
+//   3. On success, cache the response body under `idempotency-response:{key}`
+//      with 1h TTL.
+//   4. On retry (same key), return the cached response.
+//   5. If Redis is unavailable, we proceed without idempotency (best-effort).
+const IDEM_TTL_SECONDS = 3600;
 
 export async function POST(req: Request) {
+  const route = "/api/sessions/accept";
+  const start = Date.now();
+  log("api.start", { route });
+
   const ssr = supabaseSSR();
   const { data: { user } } = await ssr.auth.getUser();
-  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!user) {
+    log("api.end", { route, latency_ms: Date.now() - start, status: 401 });
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
 
   const { session_id } = await req.json();
+  const idemKey = req.headers.get("idempotency-key") || "";
+  const redis = getRedis();
+
+  // Idempotency: return cached response if we've handled this key before.
+  if (redis && idemKey) {
+    try {
+      const cached = await redis.get<string>(`idempotency-response:${idemKey}`);
+      if (cached) {
+        log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 200, idempotent: true });
+        return new NextResponse(cached, {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      // Reserve the key. If someone else already reserved it we could poll,
+      // but for MVP we just proceed (worst case: two rooms; caller retries).
+      await redis.set(`idempotency:${idemKey}`, session_id, {
+        ex: IDEM_TTL_SECONDS,
+        nx: true,
+      });
+    } catch (e) {
+      log("idempotency.error", { route, error: e instanceof Error ? e.message : String(e) });
+      // fall through — proceed without idempotency
+    }
+  }
+
   const admin = supabaseAdmin();
 
   const { data: agent } = await admin
@@ -15,19 +62,25 @@ export async function POST(req: Request) {
     .select("id, name")
     .eq("auth_user_id", user.id)
     .single();
-  if (!agent) return NextResponse.json({ error: "no_agent_row" }, { status: 400 });
+  if (!agent) {
+    log("api.end", { route, latency_ms: Date.now() - start, status: 400, reason: "no_agent_row" });
+    return NextResponse.json({ error: "no_agent_row" }, { status: 400 });
+  }
 
   const { data: session } = await admin
     .from("sessions")
     .select("id, status, agent_id, room_id")
     .eq("id", session_id)
     .single();
-  if (!session) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  if (!session) {
+    log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 404 });
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
   if (session.agent_id && session.agent_id !== agent.id) {
+    log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 409, reason: "already_taken" });
     return NextResponse.json({ error: "already_taken" }, { status: 409 });
   }
 
-  // Create the 100ms room
   const room = await createHmsRoom(session_id);
   const agent_token = await createHmsAuthToken({
     roomId: room.id,
@@ -55,10 +108,8 @@ export async function POST(req: Request) {
     { session_id, event_type: "started", actor: agent.id },
   ]);
 
-  // Set the agent busy while in the call
   await admin.from("agents").update({ status: "busy" }).eq("id", agent.id);
 
-  // Broadcast room details to the customer's channel
   const ch = admin.channel(`session:${session_id}`);
   await ch.send({
     type: "broadcast",
@@ -67,9 +118,23 @@ export async function POST(req: Request) {
   });
   await admin.removeChannel(ch);
 
-  return NextResponse.json({
-    room_id: room.id,
-    agent_token,
-    session_id,
+  const responseBody = { room_id: room.id, agent_token, session_id };
+  const responseJson = JSON.stringify(responseBody);
+
+  // Cache the response so retries with the same idempotency key return same body.
+  if (redis && idemKey) {
+    try {
+      await redis.set(`idempotency-response:${idemKey}`, responseJson, {
+        ex: IDEM_TTL_SECONDS,
+      });
+    } catch {
+      // best effort
+    }
+  }
+
+  log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 200, room_id: room.id });
+  return new NextResponse(responseJson, {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
   });
 }

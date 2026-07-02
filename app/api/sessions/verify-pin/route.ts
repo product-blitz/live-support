@@ -1,24 +1,29 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-server";
 import { signCustomerToken } from "@/lib/customer-jwt";
+import { getPinRatelimit } from "@/lib/redis";
+import { log } from "@/lib/log";
 
-// Basic in-memory rate limit (per serverless container).
-// For production, back this with Upstash/Redis. Good enough for MVP.
-const attempts = new Map<string, { n: number; ts: number }>();
-const MAX = 5;
-const WINDOW_MS = 10 * 60 * 1000;
-
+// Distributed rate limit via Upstash. Falls back to no-limit if Redis
+// isn't configured (dev without Upstash env vars).
 export async function POST(req: Request) {
+  const route = "/api/sessions/verify-pin";
+  const start = Date.now();
+  log("api.start", { route });
+
   const { session_id, pin } = await req.json();
   if (!session_id || !pin) {
+    log("api.end", { route, latency_ms: Date.now() - start, status: 400 });
     return NextResponse.json({ ok: false, error: "missing" }, { status: 400 });
   }
 
-  const key = String(session_id);
-  const now = Date.now();
-  const rec = attempts.get(key);
-  if (rec && now - rec.ts < WINDOW_MS && rec.n >= MAX) {
-    return NextResponse.json({ ok: false, error: "too_many_attempts" }, { status: 429 });
+  const rl = getPinRatelimit();
+  if (rl) {
+    const { success } = await rl.limit(`session:${session_id}`);
+    if (!success) {
+      log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 429 });
+      return NextResponse.json({ ok: false, error: "too_many_attempts" }, { status: 429 });
+    }
   }
 
   const admin = supabaseAdmin();
@@ -29,23 +34,21 @@ export async function POST(req: Request) {
     .single();
 
   if (!session) {
+    log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 404 });
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   if (session.expires_at && new Date(session.expires_at) < new Date()) {
+    log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 401, reason: "expired" });
     return NextResponse.json({ ok: false, error: "expired" }, { status: 401 });
   }
   if (["completed", "expired"].includes(session.status)) {
+    log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 401, reason: "closed" });
     return NextResponse.json({ ok: false, error: "closed" }, { status: 401 });
   }
   if (String(session.pin) !== String(pin)) {
-    attempts.set(key, {
-      n: (rec && now - rec.ts < WINDOW_MS ? rec.n : 0) + 1,
-      ts: now,
-    });
+    log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 401, reason: "invalid_pin" });
     return NextResponse.json({ ok: false, error: "invalid_pin" }, { status: 401 });
   }
-
-  attempts.delete(key);
 
   await admin.from("session_events").insert({
     session_id,
@@ -54,5 +57,6 @@ export async function POST(req: Request) {
   });
 
   const customer_token = await signCustomerToken(session_id);
+  log("api.end", { route, session_id, latency_ms: Date.now() - start, status: 200 });
   return NextResponse.json({ ok: true, customer_token });
 }

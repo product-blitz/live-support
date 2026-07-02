@@ -7,8 +7,15 @@ import { supabaseBrowser } from "@/lib/supabase-browser";
 const AgentRoom = dynamic(() => import("./AgentRoom"), { ssr: false });
 
 type Status = "online" | "busy" | "offline";
-
 type Incoming = { session_id: string; customer_name: string };
+
+// Random UUID for idempotency-key generation (browser-side).
+function uuid(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
 
 export default function AgentDashboard() {
   const [agentId, setAgentId] = useState<string | null>(null);
@@ -21,7 +28,7 @@ export default function AgentDashboard() {
   const [customerName, setCustomerName] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [busy, setBusy] = useState(false);
-  const heartbeatRef = useRef<any>(null);
+  const softPingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Load auth + agent row on mount
   useEffect(() => {
@@ -45,23 +52,59 @@ export default function AgentDashboard() {
     })();
   }, []);
 
-  // Heartbeat while online
+  // Presence + soft-refresh + beforeunload beacon.
+  // - Presence: track on `presence:agents` for other agents' visibility.
+  // - Soft refresh: every 60s hit /api/agents/status to keep last_seen_at fresh.
+  //   (Much less than the old 15s heartbeat.)
+  // - Beacon: on tab close, POST offline via sendBeacon so DB state is accurate.
   useEffect(() => {
-    if (heartbeatRef.current) {
-      clearInterval(heartbeatRef.current);
-      heartbeatRef.current = null;
+    if (softPingRef.current) {
+      clearInterval(softPingRef.current);
+      softPingRef.current = null;
     }
     if (status === "offline" || !agentId) return;
 
-    const ping = () =>
-      fetch("/api/agents/heartbeat", {
+    const sb = supabaseBrowser();
+    const ch = sb.channel("presence:agents", {
+      config: { presence: { key: agentId } },
+    });
+    ch.on("presence", { event: "sync" }, () => {
+      // No-op for now — future: show "N agents online" in the UI.
+    })
+      .subscribe(async (s) => {
+        if (s === "SUBSCRIBED") {
+          await ch.track({ agent_id: agentId, status, since: Date.now() });
+        }
+      });
+
+    // Soft refresh so last_seen_at doesn't get stale in DB.
+    const softPing = () =>
+      fetch("/api/agents/status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
-      });
-    ping();
-    heartbeatRef.current = setInterval(ping, 15_000);
-    return () => clearInterval(heartbeatRef.current);
+      }).catch(() => {});
+    softPingRef.current = setInterval(softPing, 60_000);
+
+    // Beacon on tab close — mark offline server-side. sendBeacon uses text/plain.
+    const onUnload = () => {
+      try {
+        const body = JSON.stringify({ status: "offline" });
+        navigator.sendBeacon("/api/agents/status", new Blob([body], { type: "application/json" }));
+      } catch {
+        // best effort
+      }
+    };
+    window.addEventListener("beforeunload", onUnload);
+    window.addEventListener("pagehide", onUnload);
+
+    return () => {
+      window.removeEventListener("beforeunload", onUnload);
+      window.removeEventListener("pagehide", onUnload);
+      if (softPingRef.current) clearInterval(softPingRef.current);
+      ch.untrack().catch(() => {});
+      sb.removeChannel(ch);
+    };
   }, [status, agentId]);
 
   // Subscribe to incoming ring channel
@@ -94,7 +137,7 @@ export default function AgentDashboard() {
 
   async function setMyStatus(next: Status) {
     setStatus(next);
-    await fetch("/api/agents/heartbeat", {
+    await fetch("/api/agents/status", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: next }),
@@ -103,9 +146,13 @@ export default function AgentDashboard() {
 
   async function accept() {
     if (!incoming) return;
+    const idempotencyKey = uuid();
     const res = await fetch("/api/sessions/accept", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
       body: JSON.stringify({ session_id: incoming.session_id }),
     });
     const json = await res.json();

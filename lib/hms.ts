@@ -1,7 +1,29 @@
 import { SignJWT } from "jose";
-import { randomUUID } from "crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "crypto";
 
 const HMS_API = "https://api.100ms.live/v2";
+
+// Verify 100ms webhook signature. 100ms signs the raw request body with
+// HMAC-SHA256 and sends the hex digest in the `X-Hms-Signature` header.
+// Uses constant-time comparison to prevent timing attacks.
+export function verifyHmsWebhook(body: string, signature: string): boolean {
+  const secret = process.env.HMS_WEBHOOK_SECRET;
+  if (!secret) return false;
+  if (!signature) return false;
+  const expected = createHmac("sha256", secret).update(body).digest("hex");
+  // Strip optional "sha256=" prefix, some providers include it.
+  const provided = signature.startsWith("sha256=")
+    ? signature.slice("sha256=".length)
+    : signature;
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(provided, "utf8");
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
 
 // Management token — signed JWT good for API calls to 100ms.
 // Short-lived; generate per-request rather than caching.

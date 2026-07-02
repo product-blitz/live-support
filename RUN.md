@@ -1,140 +1,172 @@
 # Live Support — Local Run + Deploy
 
-This is a Next.js 14 App Router project. Every file you need is already in this folder.
+Next.js 14 App Router project. Every file you need is already in this folder.
 
 ---
 
-## 1. Install dependencies
+## Quick start
 
 ```bash
 cd "/Users/shreyansh/Documents/Claude/Projects/Live connection"
 npm install
-```
-
-If npm complains about peer deps, use `npm install --legacy-peer-deps`.
-
----
-
-## 2. Create .env.local
-
-Copy the example and fill in your values:
-
-```bash
 cp .env.local.example .env.local
-```
-
-Open `.env.local` and paste each value from your local notes file. All 11 vars must be set:
-
-- Supabase (3)
-- 100ms (4)
-- Resend (2)
-- App URL + JWT secret (2)
-
----
-
-## 3. Run locally
-
-```bash
+# ... fill in values in .env.local (see sections below) ...
 npm run dev
 ```
 
-Open http://localhost:3000
-
-Flow to test:
-1. Visit http://localhost:3000/agent → redirects to `/agent/login`
-2. Click **New agent? Sign up**, use your work email + a password (min 6 chars)
-3. After signup, sign in with the same credentials
-4. You'll land on the dashboard. Confirm your row appears in Supabase → Table Editor → `agents`
-5. Toggle status to **online** (a green pill)
-6. Click **New support session** → enter your OWN email as customer, click **Send invite**
-7. Copy the PIN + link that shows up
-8. Open the link in a **different browser** (or Incognito) → enter the PIN
-9. Back in the agent tab, an incoming toast appears → click **Accept**
-10. Both windows should land in a 100ms room within ~5 seconds
+Open http://localhost:3000/agent → sign up → toggle online → create session → test flow.
 
 ---
 
-## 4. Push to GitHub
+## Environment variables
+
+There are 4 categories. **Bold** are required to run at all; others enable
+production-grade features but the app still works without them.
+
+**Supabase — required**
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+
+**100ms — required for video**
+- `HMS_APP_ACCESS_KEY`, `HMS_APP_SECRET`, `HMS_TEMPLATE_ID`, `HMS_SUBDOMAIN`
+- `HMS_WEBHOOK_SECRET` — optional, but without it `/api/hooks/hms` rejects all webhooks
+
+**Resend — required for email**
+- `RESEND_API_KEY`, `RESEND_FROM_EMAIL`
+
+**App core — required**
+- `NEXT_PUBLIC_APP_URL`, `CUSTOMER_JWT_SECRET`
+
+**Upstash Redis — optional (recommended)**
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
+- If unset: rate limits + idempotency are disabled (logged warning)
+
+**Sentry — optional (recommended)**
+- `NEXT_PUBLIC_SENTRY_DSN`
+- If unset: errors go only to Vercel logs
+- `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` are only needed if you
+  enable source-map upload in `next.config.js` (currently disabled)
+
+---
+
+## Deploy to Vercel
 
 ```bash
-git init
-git add .
-git commit -m "Initial commit: live support MVP"
-git branch -M main
-
-# Replace with your repo URL from GitHub
-git remote add origin https://github.com/product-blitz/live-support.git
-git push -u origin main
+vercel                            # first time — follow prompts
+vercel --prod                     # subsequent deploys
 ```
 
-`.env.local` is git-ignored — your secrets will NOT be pushed.
+Add all env vars in Vercel dashboard → Settings → Environment Variables.
+**Tick Production + Preview + Development for each.**
+
+`NEXT_PUBLIC_APP_URL` on Vercel = your Vercel URL, not `localhost:3000`.
 
 ---
 
-## 5. Deploy to Vercel
+## Post-deploy configuration
 
-```bash
-vercel
-```
+### Supabase → Auth → URL Configuration
+- Site URL: your Vercel URL
+- Redirect URLs: `https://your-app.vercel.app/**`
 
-Follow the prompts:
-- Set up and deploy? **Y**
-- Which scope? your personal account
-- Link to existing project? **N**
-- Project name? `live-support`
-- In which directory is your code? `./`
-- Override settings? **N**
+### 100ms → Developer → Webhooks
+- Add endpoint: `https://your-app.vercel.app/api/hooks/hms`
+- Events to send: `session.close.success`, `peer.leave.success`, `peer.join.success`
+- Copy the signing secret → set as `HMS_WEBHOOK_SECRET` in Vercel
 
-Then add env vars in the Vercel dashboard:
-1. Go to https://vercel.com/dashboard → click your `live-support` project → **Settings → Environment Variables**
-2. Add each of the 11 vars from your `.env.local` (except `NEXT_PUBLIC_APP_URL` — set that to your Vercel URL, e.g., `https://live-support-xxx.vercel.app`)
-3. Redeploy: `vercel --prod`
+### BetterStack (or UptimeRobot)
+- Add HTTP monitor: `https://your-app.vercel.app/api/health`
+- Interval: 3 min. Alerts on 5xx or timeout.
 
----
-
-## 6. Update Supabase URL config for production
-
-After deploy, go to Supabase → Authentication → URL Configuration:
-- **Site URL**: your Vercel URL (e.g., `https://live-support-xxx.vercel.app`)
-- **Redirect URLs**: add `https://live-support-xxx.vercel.app/**`
+### Sentry
+- Sign up → create Next.js project → copy DSN → paste as `NEXT_PUBLIC_SENTRY_DSN`
 
 ---
 
-## 7. Enable Realtime broadcast
+## Database migrations
 
-Supabase Realtime broadcast works out of the box for any channel name. No config needed.
+Schema is versioned in `supabase/migrations/`. See `supabase/README.md`.
 
-If you see channel messages not arriving:
-- Confirm you're using the **same** Supabase project on both client and server
-- Confirm you didn't disable Realtime in Project Settings
+To apply:
+- **New project:** paste each file into Supabase SQL Editor in order.
+- **Existing project:** `supabase link --project-ref <ref>` then `supabase db push`.
+
+Never edit an old migration — add a new one.
 
 ---
 
-## 8. Smoke-test checklist
+## Architecture reference
 
-- [ ] Agent A signs up → row in `agents`
-- [ ] Agent A signs in → dashboard loads
-- [ ] Agent A toggles online → `last_ping_at` updates in DB
-- [ ] Agent creates session → email arrives at customer address
-- [ ] Customer link + PIN works → waiting screen appears
-- [ ] Wrong PIN → error message; correct PIN → advances
-- [ ] Agent A sees "Incoming session" toast
-- [ ] Agent A clicks Accept → both parties in a 100ms room within ~5s
-- [ ] Video, audio, screen share, chat all work
-- [ ] Either party clicks End/Leave → both drop out
-- [ ] `sessions` row shows `status='completed'`, `ended_at` set
+### Presence design
+
+`agents.status` in Postgres is the **source of truth** for routing.
+
+The client keeps DB state fresh with three signals, in order of importance:
+
+1. **On every status button click** → `POST /api/agents/status` (writes status + `last_seen_at`).
+2. **Every 60s while online** → soft refresh POST to the same endpoint. Prevents `last_seen_at` from getting stale.
+3. **`beforeunload` / `pagehide` beacon** → `navigator.sendBeacon` sets status to `offline` when the tab closes. Best effort — some browsers drop it.
+
+The `presence:agents` Supabase Realtime channel is used only for other agents' visibility (nice-to-have UI, not routing).
+
+`pickAndRingAgent` filters by `status='online' AND last_seen_at > now() - 5 min`. The 5-min window catches cases where the beacon didn't fire and the browser was force-killed.
+
+**Why not fully realtime presence?** Supabase Presence server-side inspection needs an additional subscribe + wait cycle per pick, which slows routing. The DB-based approach is simple, robust, and adequate up to hundreds of agents.
+
+### Idempotency
+
+`POST /api/sessions/accept` accepts an `Idempotency-Key` header. On duplicate keys (retries, double-clicks), we return the cached response instead of creating a second 100ms room. Cache lives in Upstash Redis with 1h TTL. Falls back to no-op if Redis is unavailable.
+
+### Webhook handler
+
+`POST /api/hooks/hms` verifies HMAC-SHA256 signature (using `HMS_WEBHOOK_SECRET`) and auto-closes orphaned sessions on `session.close.success` or `peer.leave.success` (agent role). Dedup via Redis on `event.id`.
+
+### Structured logs
+
+Every API route emits `event: 'api.start'` and `event: 'api.end'` JSON lines with trace_id, session_id, latency_ms, and status. Grep Vercel logs by `session_id` to debug a single call.
+
+### Health check
+
+`GET /api/health` — 200 if DB, Redis, and config env vars all check out; 503 otherwise. Wire to BetterStack for uptime alerts.
+
+---
+
+## Smoke test checklist
+
+- [ ] Sign up → row in `agents` table (via `handle_new_agent` trigger)
+- [ ] Sign in → dashboard loads, presence-tracked
+- [ ] Toggle online → `agents.status='online'`, `last_seen_at` updates
+- [ ] Create session with own email → email arrives, PIN + link shown
+- [ ] Customer opens link (Incognito) → PIN entry → waiting screen
+- [ ] Wrong PIN → error; after 5 wrong → 429 rate-limited (needs Upstash configured)
+- [ ] Correct PIN → agent tab shows Incoming toast
+- [ ] Accept → both parties in 100ms room within 5s
+- [ ] Double-click Accept → still only one room (idempotency)
+- [ ] Close agent tab mid-call → session auto-closes within ~30s (needs webhook configured)
+- [ ] Click End → both drop, `sessions.status='completed'`
 - [ ] Two agents online → sessions alternate (round-robin)
-- [ ] Agent B declines → session re-routes to Agent A
-- [ ] Agent offline → not picked
-- [ ] Link older than 24h → shows "expired"
+- [ ] Decline → routes to next agent
+- [ ] Offline agent → not picked
+- [ ] Link older than 24h → "expired"
+- [ ] `GET /api/health` → 200 with all checks 'ok'
 
 ---
 
 ## Known gotchas
 
-- **Resend free tier only sends to your signup email** until you verify a domain. For MVP testing, put your own email as the "customer email".
-- **100ms 10,000 free minutes/month**. Roughly 400 minutes/day is your ceiling. Monitor usage in the 100ms dashboard.
-- **iOS Safari does not support screen share in-browser.** Video + audio + chat still work.
-- **Vercel Hobby has 10-second serverless function timeout.** All routes here complete well under that.
-- **Ringing timeouts are best-effort.** If an agent never accepts, the cron re-queues after ~30s next time it runs. For a tighter UX, add a client-side timeout that calls `/api/sessions/decline` after 20s of ringing.
-- **Concurrent picker race.** For MVP the round-robin picker uses PostgREST (no SELECT FOR UPDATE). Very rare cases where two customers ring the same agent at exactly the same instant — worst case, one gets declined and re-queues.
+- **Resend free tier only sends to your signup email** until domain verified.
+- **100ms 10K free min/month.** Monitor in 100ms dashboard.
+- **iOS Safari can't screen share in-browser.** Video/audio/chat work.
+- **Vercel Hobby cron limit** — daily only. See `vercel.json`.
+- **Beacon on tab close is best-effort.** Rely on webhook + 5-min stale filter for reliability.
+- **Concurrent picker race.** Very rare; retry via decline works.
+
+---
+
+## Post-MVP additions (in priority order)
+
+1. Session recording (100ms feature flag)
+2. Remote control (RustDesk bolt-on)
+3. Skill / department routing
+4. Post-session survey email
+5. Analytics dashboard
+6. Customer-initiated sessions (widget on your site)
