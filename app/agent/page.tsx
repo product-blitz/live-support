@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { supabaseBrowser } from "@/lib/supabase-browser";
-import AgentRoom from "./AgentRoom";
+
+const AgentRoom = dynamic(() => import("./AgentRoom"), { ssr: false });
 
 type Status = "online" | "busy" | "offline";
 

@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { supabaseBrowser } from "@/lib/supabase-browser";
-import CustomerRoom from "./CustomerRoom";
+
+const CustomerRoom = dynamic(() => import("./CustomerRoom"), { ssr: false });
 
 type Phase = "pin" | "verifying" | "waiting" | "connecting" | "room" | "ended" | "no_agents";
 
