@@ -35,11 +35,23 @@ export async function POST(req: Request) {
   log("api.start", { route });
 
   const rawBody = await req.text();
-  const signature = req.headers.get("x-hms-signature") || "";
-  if (!verifyHmsWebhook(rawBody, signature)) {
-    log("hms.webhook.signature_failed", { route });
-    log("api.end", { route, latency_ms: Date.now() - start, status: 401 });
-    return NextResponse.json({ error: "bad_signature" }, { status: 401 });
+  const signature =
+    req.headers.get("x-hms-signature") ||
+    req.headers.get("x-webhook-signature") ||
+    "";
+
+  // If a webhook secret is configured, require and verify signature.
+  // Otherwise accept unsigned requests (dev/testing/free-tier). This keeps
+  // the endpoint usable while still enforcing signatures once you set the secret.
+  const secretConfigured = !!process.env.HMS_WEBHOOK_SECRET;
+  if (secretConfigured) {
+    if (!verifyHmsWebhook(rawBody, signature)) {
+      log("hms.webhook.signature_failed", { route, has_sig: !!signature });
+      log("api.end", { route, latency_ms: Date.now() - start, status: 401 });
+      return NextResponse.json({ error: "bad_signature" }, { status: 401 });
+    }
+  } else {
+    log("hms.webhook.unsigned_accepted", { route });
   }
 
   let evt: HmsEvent;
