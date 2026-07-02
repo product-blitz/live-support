@@ -1,6 +1,14 @@
 import { Resend } from "resend";
 
-const resend = new Resend(process.env.RESEND_API_KEY!);
+// Lazy init so the build doesn't need RESEND_API_KEY at compile time.
+let _resend: Resend | null = null;
+function client() {
+  if (_resend) return _resend;
+  const key = process.env.RESEND_API_KEY;
+  if (!key) throw new Error("RESEND_API_KEY not set");
+  _resend = new Resend(key);
+  return _resend;
+}
 
 export async function sendCustomerInvite(opts: {
   to: string;
@@ -24,7 +32,7 @@ export async function sendCustomerInvite(opts: {
     </div>
   `;
 
-  const { error } = await resend.emails.send({
+  const { error } = await client().emails.send({
     from: process.env.RESEND_FROM_EMAIL!,
     to: opts.to,
     subject: "Your support session link",
